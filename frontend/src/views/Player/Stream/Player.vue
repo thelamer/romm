@@ -5,6 +5,7 @@
       v-if="
         playerState === 'idle' ||
         playerState === 'loading' ||
+        playerState === 'launching' ||
         playerState === 'error'
       "
       class="launch-screen"
@@ -54,8 +55,36 @@
         {{ errorMessage }}
       </v-alert>
 
+      <!-- Extraction / launch progress -->
+      <div v-if="playerState === 'launching'" class="launching-progress mb-6">
+        <v-progress-linear
+          v-if="launchProgress !== null"
+          :model-value="launchProgress"
+          color="primary"
+          height="6"
+          rounded
+          bg-color="rgba(255,255,255,0.1)"
+          class="mb-3"
+          style="max-width: 320px; margin: 0 auto"
+        />
+        <v-progress-circular
+          v-else
+          indeterminate
+          color="primary"
+          size="28"
+          width="3"
+          class="mb-3"
+        />
+        <p class="text-body-2 text-medium-emphasis text-center">
+          {{ launchStatusMessage }}
+        </p>
+      </div>
+
       <!-- Action buttons -->
-      <div class="d-flex gap-3 justify-center flex-wrap">
+      <div
+        v-if="playerState !== 'launching'"
+        class="d-flex gap-3 justify-center flex-wrap"
+      >
         <v-btn
           color="primary"
           size="large"
@@ -78,6 +107,17 @@
           :to="backRoute"
         >
           Back
+        </v-btn>
+      </div>
+      <!-- Cancel button shown only during launching -->
+      <div v-else class="d-flex gap-3 justify-center flex-wrap">
+        <v-btn
+          variant="tonal"
+          size="large"
+          prepend-icon="mdi-arrow-left"
+          :to="backRoute"
+        >
+          Cancel
         </v-btn>
       </div>
     </div>
@@ -349,7 +389,7 @@ interface Rom {
   url_cover?: string | null;
 }
 
-type PlayerState = "idle" | "loading" | "playing" | "error";
+type PlayerState = "idle" | "loading" | "launching" | "playing" | "error";
 type ErrorType = "occupied" | "not_configured" | "server" | null;
 
 const route = useRoute();
@@ -371,6 +411,11 @@ const isLoadingAutosave = ref(false);
 const selectedSlot = ref(1);
 const volume = ref(1);
 const isMuted = ref(false);
+
+const launchStatus = ref<string>("");
+const launchProgress = ref<number | null>(null);
+const launchDetail = ref<string | null>(null);
+let statusPollInterval: ReturnType<typeof setInterval> | null = null;
 
 // Sync volume slider (0–1) and mute button to the broker in real time.
 // Debounced via watch — only fires after the value settles for 150ms.
@@ -422,6 +467,24 @@ const backRoute = computed(() =>
   rom.value ? { name: "rom", params: { rom: rom.value.id } } : { name: "home" },
 );
 
+const launchStatusMessage = computed(() => {
+  if (launchDetail.value) return launchDetail.value;
+  switch (launchStatus.value) {
+    case "evicting":
+      return "Freeing cache space…";
+    case "extracting":
+      return launchProgress.value !== null
+        ? `Extracting game files… (${launchProgress.value}%)`
+        : "Extracting game files…";
+    case "launching":
+      return "Starting emulator…";
+    case "saving":
+      return "Saving game…";
+    default:
+      return "Loading…";
+  }
+});
+
 onMounted(async () => {
   await fetchRom();
   document.addEventListener("fullscreenchange", onFullscreenChange);
@@ -429,6 +492,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  stopStatusPolling();
   document.removeEventListener("fullscreenchange", onFullscreenChange);
   if (uiTimeout) clearTimeout(uiTimeout);
   attachTimeouts.forEach((id) => clearTimeout(id));
@@ -525,6 +589,47 @@ function attachIframeListeners(): void {
   tryAttach();
 }
 
+function startStatusPolling(): void {
+  stopStatusPolling();
+  const platform = rom.value?.platform_slug;
+  if (!platform) return;
+
+  const poll = async (): Promise<void> => {
+    const status = await streamingStore.getStatus(platform);
+    if (!status) return; // network error — keep polling
+
+    launchStatus.value = status.launch_status;
+    launchProgress.value = status.launch_progress;
+    launchDetail.value = status.launch_detail;
+
+    if (status.launch_status === "running") {
+      stopStatusPolling();
+      playerState.value = "playing";
+      attachTimeouts.forEach((id) => clearTimeout(id));
+      attachTimeouts = [];
+      attachTimeouts.push(setTimeout(attachIframeListeners, 100));
+      attachTimeouts.push(setTimeout(attachIframeListeners, 500));
+    } else if (status.launch_status === "error") {
+      stopStatusPolling();
+      playerState.value = "error";
+      errorType.value = "server";
+      errorMessage.value =
+        status.launch_detail ?? "An error occurred while launching.";
+    }
+  };
+
+  // Immediate first poll, then every 2s
+  void poll();
+  statusPollInterval = setInterval(() => void poll(), 2000);
+}
+
+function stopStatusPolling(): void {
+  if (statusPollInterval !== null) {
+    clearInterval(statusPollInterval);
+    statusPollInterval = null;
+  }
+}
+
 async function handlePlay(): Promise<void> {
   if (!rom.value) return;
   if (!container.value) {
@@ -551,14 +656,8 @@ async function handlePlay(): Promise<void> {
       rom.value.name,
     );
     containerHost.value = session.host;
-    playerState.value = "playing";
-
-    // Wait for DOM to update and iframe to exist
-    attachTimeouts.forEach((id) => clearTimeout(id));
-    attachTimeouts = [];
-    attachTimeouts.push(setTimeout(attachIframeListeners, 100));
-    // Also try slightly later as some frames might be slow to initialize window
-    attachTimeouts.push(setTimeout(attachIframeListeners, 500));
+    playerState.value = "launching";
+    startStatusPolling();
   } catch (err: unknown) {
     playerState.value = "error";
 
@@ -856,5 +955,12 @@ function formatTime(iso: string): string {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+.launching-progress {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
 }
 </style>

@@ -324,6 +324,22 @@ def _load_state_broker(container: dict[str, Any], slot: int) -> bool:
         return False
 
 
+def _get_broker_status(container: dict[str, Any]) -> dict[str, Any]:
+    """GET /status from the broker. Returns broker status dict, or error dict on failure."""
+    url = _broker_url(container, "/status")
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:  # nosec B310
+            return json.loads(resp.read())
+    except Exception as exc:
+        log.warning("streaming: broker status failed — %s", exc)
+        return {
+            "launch_status": "error",
+            "launch_detail": str(exc),
+            "launch_progress": None,
+        }
+
+
 def _stop_broker(container: dict[str, Any]) -> None:
     """Tell the broker to stop emulator. Best-effort — don't raise on failure."""
     url = _broker_url(container, "/launch")
@@ -541,6 +557,39 @@ async def load_state(platform: str, req: LoadStateRequest) -> JSONResponse:
             "platform": platform,
         }
     )
+
+
+def _get_broker_status(container: dict[str, Any]) -> dict[str, Any]:
+    """GET /status from the broker. Returns broker status or error dict on failure."""
+    url = _broker_url(container, "/status")
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:  # nosec B310
+            return json.loads(resp.read())
+    except Exception as exc:
+        log.warning("streaming: broker status failed — %s", exc)
+        return {
+            "launch_status": "error",
+            "launch_detail": str(exc),
+            "launch_progress": None,
+        }
+
+
+@router.get("/sessions/{platform}/status")
+async def get_session_status(platform: str) -> JSONResponse:
+    """Proxy broker /status to the frontend for launch-progress polling."""
+    session = _sessions.get(platform)
+    if session is None:
+        raise HTTPException(
+            status_code=404, detail=f"No active session for platform '{platform}'"
+        )
+    container = _container_for_platform(platform)
+    if not container:
+        raise HTTPException(
+            status_code=404, detail=f"No container for platform '{platform}'"
+        )
+    status = await asyncio.to_thread(_get_broker_status, container)
+    return JSONResponse(status)
 
 
 @router.delete("/sessions/{platform}")

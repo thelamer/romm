@@ -75,6 +75,10 @@ export const useStreamingStore = defineStore("streaming", () => {
     if (lower === "xbox") {
       return { maxSlots: 9, hasAutosave: true, autosaveSlot: 10 };
     }
+    if (lower === "ps3") {
+      // rpcs3 has one save-state slot per game (Ctrl+S/Ctrl+R); no autosave.
+      return { maxSlots: 1, hasAutosave: false, autosaveSlot: 0 };
+    }
     return { maxSlots: 9, hasAutosave: true, autosaveSlot: 10 };
   }
 
@@ -250,6 +254,27 @@ export const useStreamingStore = defineStore("streaming", () => {
   }
 
   /**
+   * Poll broker launch status for the given platform.
+   * Returns null on network error — callers should keep polling.
+   */
+  async function getStatus(platform: string): Promise<{
+    launch_status: string;
+    launch_progress: number | null;
+    launch_detail: string | null;
+  } | null> {
+    if (!platform) return null;
+    try {
+      const res = await fetch(`/api/streaming/sessions/${platform}/status`, {
+        cache: "no-store",
+      });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Load game state from a slot (1–9).
    * Best-effort — never throws.
    */
@@ -289,5 +314,6 @@ export const useStreamingStore = defineStore("streaming", () => {
     setMute,
     saveState,
     loadState,
+    getStatus,
   };
 });
